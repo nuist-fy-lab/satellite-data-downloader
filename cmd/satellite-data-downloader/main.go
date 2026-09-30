@@ -21,11 +21,19 @@ import (
 
 func main() {
 	cfg := config.Load()
-	for _, path := range []string{filepath.Dir(cfg.SocketPath), filepath.Dir(cfg.DBPath), cfg.DownloadRoot, cfg.ArchiveRoot} {
+	for _, path := range []string{filepath.Dir(cfg.SocketPath), filepath.Dir(cfg.DBPath), cfg.DownloadRoot} {
 		if err := os.MkdirAll(path, 0o750); err != nil {
 			slog.Error("create runtime directory", "path", path, "error", err)
 			os.Exit(1)
 		}
+	}
+	archiveMode := os.FileMode(0o750)
+	if cfg.ArchiveGroupWritable {
+		archiveMode = 0o777
+	}
+	if err := os.MkdirAll(cfg.ArchiveRoot, archiveMode); err != nil {
+		slog.Error("create archive directory", "path", cfg.ArchiveRoot, "error", err)
+		os.Exit(1)
 	}
 	state, err := store.Open(cfg.DBPath)
 	if err != nil {

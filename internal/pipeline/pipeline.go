@@ -39,6 +39,9 @@ type providerFlow struct {
 	bytes, lastBytes         int64
 	lastSample               time.Time
 	rate                     float64
+	gap                      time.Duration
+	nextStart                time.Time
+	errorRate                float64
 }
 
 func (f *providerFlow) start() bool {
@@ -51,17 +54,60 @@ func (f *providerFlow) start() bool {
 	return true
 }
 
+func (f *providerFlow) pace(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		f.Lock()
+		wait := time.Until(f.nextStart)
+		if wait <= 0 {
+			f.nextStart = time.Now().Add(f.gap)
+			f.Unlock()
+			return nil
+		}
+		f.Unlock()
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (f *providerFlow) cooldown(delay time.Duration) {
+	if delay <= 0 {
+		return
+	}
+	f.Lock()
+	defer f.Unlock()
+	if until := time.Now().Add(min(delay, time.Hour)); until.After(f.nextStart) {
+		f.nextStart = until
+	}
+}
+
 func (f *providerFlow) finish(success, congested bool, ceiling int) {
 	f.Lock()
 	defer f.Unlock()
 	f.active--
 	if congested {
-		f.limit = max(1, f.limit/2)
+		f.errorRate = f.errorRate*0.8 + 0.2
+		if f.errorRate >= 0.2 {
+			f.limit = max(1, f.limit/2)
+			f.gap = min(5*time.Second, max(100*time.Millisecond, f.gap*2))
+			if next := time.Now().Add(f.gap); next.After(f.nextStart) {
+				f.nextStart = next
+			}
+		}
 		f.successes = 0
-	} else if success && f.limit < ceiling {
+	} else if success {
+		f.errorRate *= 0.8
 		f.successes++
-		if f.successes >= 8 {
-			f.limit++
+		if f.successes >= 8 && f.errorRate < 0.1 {
+			f.limit = min(ceiling, f.limit+1)
+			f.gap = max(100*time.Millisecond, f.gap*4/5)
 			f.successes = 0
 		}
 	}
@@ -98,7 +144,8 @@ func New(cfg config.Config, state *store.Store, accessManager *access.Manager) (
 			return nil, fmt.Errorf("duplicate provider %q", item.SourceID)
 		}
 		providers[item.SourceID] = item
-		flows[item.SourceID] = &providerFlow{limit: max(1, item.TransferConcurrency), lastSample: time.Now()}
+		flows[item.SourceID] = &providerFlow{limit: max(1, item.TransferConcurrency),
+			gap: 200 * time.Millisecond, lastSample: time.Now()}
 	}
 	return &Runtime{
 		cfg: cfg, store: state, access: accessManager, provider: providers, flows: flows,
@@ -226,11 +273,20 @@ func (r *Runtime) transferLoop(ctx context.Context, provider config.Provider, wo
 			poll.Reset(25 * time.Millisecond)
 			continue
 		}
+		if err := flow.pace(ctx); err != nil {
+			flow.finish(false, false, provider.TransferConcurrency)
+			_ = r.store.RetryTransfer(context.WithoutCancel(ctx), task.ID, err, time.Second)
+			return
+		}
 		requestCtx, cancel := context.WithTimeout(ctx, provider.RequestTimeout)
 		result, err := route.Transfer.Download(requestCtx, task, r.cfg.DownloadRoot, route.Authorizer, flow.addBytes)
 		cancel()
 		if err != nil {
 			flow.finish(false, isCongestion(err), provider.TransferConcurrency)
+			var httpErr *transfer.HTTPError
+			if errors.As(err, &httpErr) && isCongestion(err) {
+				flow.cooldown(httpErr.RetryAfter)
+			}
 			r.handleTransferError(ctx, provider, task, route, err)
 			poll.Reset(25 * time.Millisecond)
 			continue
@@ -308,7 +364,7 @@ func (r *Runtime) verifyLoop(ctx context.Context, provider config.Provider, work
 		if archiveRoot == "" {
 			archiveRoot = r.cfg.ArchiveRoot
 		}
-		result, err := transfer.Promote(task, archiveRoot, provider.ArchiveRoot != "")
+		result, err := transfer.Promote(task, archiveRoot, provider.ArchiveRoot != "" || r.cfg.ArchiveGroupWritable)
 		if err != nil {
 			var collision *transfer.CollisionError
 			if errors.As(err, &collision) {

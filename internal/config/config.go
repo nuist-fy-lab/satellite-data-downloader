@@ -19,13 +19,14 @@ type Provider struct {
 }
 
 type Config struct {
-	SocketPath         string
-	DBPath             string
-	CentralSocket      string
-	DownloadRoot       string
-	ArchiveRoot        string
-	ArchiveEventSocket string
-	Providers          []Provider
+	SocketPath           string
+	DBPath               string
+	CentralSocket        string
+	DownloadRoot         string
+	ArchiveRoot          string
+	ArchiveGroupWritable bool
+	ArchiveEventSocket   string
+	Providers            []Provider
 }
 
 func Load() Config {
@@ -44,13 +45,14 @@ func Load() Config {
 		provider("era5", true, 2, 2, 10*time.Minute, "cds"),
 	}
 	return Config{
-		SocketPath:         env("SATDOWN_SOCKET", filepath.Join(state, "downloader.sock")),
-		DBPath:             env("SATDOWN_DB", filepath.Join(state, "downloader.sqlite3")),
-		CentralSocket:      env("SATDOWN_CENTRAL_SOCKET", filepath.Join(home, ".local", "state", "satellite-data", "central.sock")),
-		DownloadRoot:       env("SATDOWN_DOWNLOAD_ROOT", filepath.Join(state, "delivery")),
-		ArchiveRoot:        env("SATDOWN_ARCHIVE_ROOT", filepath.Join(home, "satellite-downloads")),
-		ArchiveEventSocket: env("SATDOWN_ARCHIVE_EVENT_SOCKET", filepath.Join(home, ".local", "state", "satellite-data", "archive-events.sock")),
-		Providers:          providers,
+		SocketPath:           env("SATDOWN_SOCKET", filepath.Join(state, "downloader.sock")),
+		DBPath:               env("SATDOWN_DB", filepath.Join(state, "downloader.sqlite3")),
+		CentralSocket:        env("SATDOWN_CENTRAL_SOCKET", filepath.Join(home, ".local", "state", "satellite-data", "central.sock")),
+		DownloadRoot:         env("SATDOWN_DOWNLOAD_ROOT", filepath.Join(state, "delivery")),
+		ArchiveRoot:          env("SATDOWN_ARCHIVE_ROOT", filepath.Join(home, "satellite-downloads")),
+		ArchiveGroupWritable: envBool("SATDOWN_ARCHIVE_GROUP_WRITABLE", true),
+		ArchiveEventSocket:   env("SATDOWN_ARCHIVE_EVENT_SOCKET", filepath.Join(home, ".local", "state", "satellite-data", "archive-events.sock")),
+		Providers:            providers,
 	}
 }
 

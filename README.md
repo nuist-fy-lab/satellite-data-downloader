@@ -37,6 +37,12 @@ satellite-data discovery
 
 Every provider has its own worker pools and retry clock. A slow or broken
 provider cannot consume another provider's transfer or verification slots.
+Network starts are paced separately per provider: the interval starts at
+200 ms, rises on repeated 408/429/5xx or timeouts (up to 5 seconds), and
+falls after sustained success (no less than 100 ms). The existing adaptive
+transfer concurrency stays between 1 and the configured per-provider maximum.
+When supplied, `Retry-After` also delays new transfers for that provider,
+up to one hour; individual task retries remain durable and jittered.
 Himawari-8/9 use independent single-transfer/single-verifier pools by default
 so their segmented AHI full-disk objects cannot starve other providers.
 

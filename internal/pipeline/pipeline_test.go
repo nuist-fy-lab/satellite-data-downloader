@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -33,7 +34,7 @@ func TestERA5TasksUseOnlyTheStableCentreReference(t *testing.T) {
 }
 
 func TestProviderFlowAdaptsWithinCeiling(t *testing.T) {
-	flow := &providerFlow{limit: 4, lastSample: time.Now().Add(-2 * time.Second)}
+	flow := &providerFlow{limit: 4, gap: 200 * time.Millisecond, lastSample: time.Now().Add(-2 * time.Second)}
 	for range 4 {
 		if !flow.start() {
 			t.Fatal("capacity lost before limit")
@@ -44,8 +45,11 @@ func TestProviderFlowAdaptsWithinCeiling(t *testing.T) {
 	}
 	flow.finish(false, true, 4)
 	limit, active, _ := flow.snapshot()
-	if limit != 2 || active != 3 {
+	if limit != 2 || active != 3 || flow.gap != 400*time.Millisecond {
 		t.Fatalf("after throttle: limit=%d active=%d", limit, active)
+	}
+	if time.Until(flow.nextStart) < 300*time.Millisecond {
+		t.Fatalf("failure did not slow next network start: %s", time.Until(flow.nextStart))
 	}
 	for range 3 {
 		flow.finish(true, false, 4)
@@ -59,6 +63,36 @@ func TestProviderFlowAdaptsWithinCeiling(t *testing.T) {
 	limit, _, _ = flow.snapshot()
 	if limit != 3 {
 		t.Fatalf("expected additive recovery, got %d", limit)
+	}
+	for range 12 {
+		flow.active++
+		flow.finish(false, true, 4)
+	}
+	if flow.limit != 1 || flow.gap != 5*time.Second {
+		t.Fatalf("congestion not bounded: limit=%d gap=%s", flow.limit, flow.gap)
+	}
+	for range 160 {
+		flow.active++
+		flow.finish(true, false, 4)
+	}
+	if flow.limit != 4 || flow.gap != 100*time.Millisecond {
+		t.Fatalf("success recovery not bounded: limit=%d gap=%s", flow.limit, flow.gap)
+	}
+}
+
+func TestProviderPacingAndCooldown(t *testing.T) {
+	flow := &providerFlow{limit: 2, gap: time.Hour}
+	if err := flow.pace(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	flow.cooldown(2 * time.Hour)
+	if time.Until(flow.nextStart) > time.Hour || time.Until(flow.nextStart) < 59*time.Minute {
+		t.Fatalf("Retry-After cap not honored: %s", time.Until(flow.nextStart))
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if err := flow.pace(ctx); err == nil {
+		t.Fatal("pace should honor cancellation")
 	}
 }
 

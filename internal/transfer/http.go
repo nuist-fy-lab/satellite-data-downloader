@@ -355,15 +355,9 @@ func Promote(task model.Task, archiveRoot string, groupWritable ...bool) (Promot
 
 	temp := filepath.Join(targetDir, fmt.Sprintf(".%s.task-%d.tmp", name, task.ID))
 	_ = os.Remove(temp)
-	if err := copyFile(task.StagingPath, temp); err != nil {
+	if err := copyFile(task.StagingPath, temp, shared); err != nil {
 		_ = os.Remove(temp)
 		return PromoteResult{}, err
-	}
-	if shared {
-		if err := os.Chmod(temp, 0o660); err != nil {
-			_ = os.Remove(temp)
-			return PromoteResult{}, err
-		}
 	}
 	tempDigest, err := fileSHA256(temp)
 	if err != nil {
@@ -407,7 +401,8 @@ func ensureArchiveDirectory(root, relative string, groupWritable bool) error {
 		current = filepath.Join(current, component)
 		mode := os.FileMode(0o750)
 		if groupWritable {
-			mode = os.ModeSetgid | 0o770
+			// Allow the parent ACL to propagate group write and public read.
+			mode = os.ModeSetgid | 0o777
 		}
 		created := false
 		if err := os.Mkdir(current, mode); err == nil {
@@ -422,8 +417,8 @@ func ensureArchiveDirectory(root, relative string, groupWritable bool) error {
 		if !info.IsDir() {
 			return &CollisionError{Path: current}
 		}
-		if created && groupWritable {
-			if err := os.Chmod(current, mode); err != nil {
+		if created && groupWritable && (info.Mode().Perm() != 0o775 || info.Mode()&os.ModeSetgid == 0) {
+			if err := os.Chmod(current, os.ModeSetgid|0o775); err != nil {
 				return err
 			}
 		}
@@ -431,15 +426,29 @@ func ensureArchiveDirectory(root, relative string, groupWritable bool) error {
 	return nil
 }
 
-func copyFile(source, destination string) error {
+func copyFile(source, destination string, shared bool) error {
 	in, err := os.Open(source)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(destination, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, 0o640)
+	mode := os.FileMode(0o640)
+	if shared {
+		mode = 0o666
+	}
+	out, err := os.OpenFile(destination, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, mode)
 	if err != nil {
 		return err
+	}
+	if shared {
+		info, err := out.Stat()
+		if err == nil && info.Mode().Perm() != 0o664 {
+			err = out.Chmod(0o664)
+		}
+		if err != nil {
+			_ = out.Close()
+			return err
+		}
 	}
 	_, copyErr := io.CopyBuffer(out, in, make([]byte, 1<<20))
 	syncErr := out.Sync()

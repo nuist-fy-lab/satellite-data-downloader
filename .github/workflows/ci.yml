@@ -24,6 +24,8 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - name: Vet
         run: go vet ./...
+      - name: Install ACL tools for archive inheritance checks
+        run: sudo apt-get update && sudo apt-get install -y acl
       - name: Test
         run: go test ./...
       - name: Race-check IPC and queue contracts

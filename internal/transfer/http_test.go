@@ -127,12 +127,12 @@ func TestPromoteSharedArchiveCreatesGroupWritableFiles(t *testing.T) {
 	}
 	for _, part := range []string{"CDS", "CDS/dataset", "CDS/dataset/2026/09/28/job-1"} {
 		info, err := os.Stat(filepath.Join(archive, part))
-		if err != nil || info.Mode().Perm() != 0o770 || info.Mode()&os.ModeSetgid == 0 {
+		if err != nil || info.Mode().Perm() != 0o775 || info.Mode()&os.ModeSetgid == 0 {
 			t.Fatalf("shared directory %s mode: %v (%v)", part, info, err)
 		}
 	}
 	info, err := os.Stat(result.Path)
-	if err != nil || info.Mode().Perm() != 0o660 {
+	if err != nil || info.Mode().Perm() != 0o664 {
 		t.Fatalf("shared file mode: %v (%v)", info, err)
 	}
 }
