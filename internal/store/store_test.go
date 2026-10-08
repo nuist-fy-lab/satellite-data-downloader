@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,64 @@ import (
 
 	"github.com/nuist-fy-lab/satellite-data-downloader/internal/model"
 )
+
+func TestOfficialChecksumMigrationPreservesOldQueueAndVerificationStatus(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "existing.sqlite3")
+	legacy, err := sql.Open("sqlite", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Recreate the legacy queue schema without the new verification fields.
+	legacySchema := `CREATE TABLE tasks(
+	  id INTEGER PRIMARY KEY AUTOINCREMENT,task_key TEXT NOT NULL UNIQUE,
+	  source_id TEXT NOT NULL,collection_id TEXT NOT NULL,granule_id TEXT NOT NULL,
+	  asset_id TEXT NOT NULL,filename TEXT NOT NULL,url TEXT NOT NULL,
+	  auth_ref TEXT NOT NULL DEFAULT '',relative_dir TEXT NOT NULL,
+	  expected_size INTEGER NOT NULL DEFAULT 0,etag TEXT NOT NULL DEFAULT '',
+	  media_type TEXT NOT NULL DEFAULT '',state TEXT NOT NULL DEFAULT 'queued',
+	  attempts INTEGER NOT NULL DEFAULT 0,next_attempt_ns INTEGER NOT NULL DEFAULT 0,
+	  observed_size INTEGER NOT NULL DEFAULT 0,sha256 TEXT NOT NULL DEFAULT '',
+	  staging_path TEXT NOT NULL DEFAULT '',archive_path TEXT NOT NULL DEFAULT '',
+	  last_error TEXT NOT NULL DEFAULT '',requested_at TEXT NOT NULL,
+	  started_at TEXT NOT NULL DEFAULT '',completed_at TEXT NOT NULL DEFAULT '',
+	  updated_at TEXT NOT NULL);
+	INSERT INTO tasks(task_key,source_id,collection_id,granule_id,asset_id,filename,url,relative_dir,requested_at,updated_at)
+	VALUES('legacy-modis','modis','modis:collection','modis:G123-LAADS','123','cloud.hdf','https://example.invalid/cloud.hdf','modis/2023','2026-10-08T12:00:00Z','2026-10-08T12:00:00Z');`
+	if _, err := legacy.Exec(legacySchema); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	queued, err := state.TaskByKey(ctx, "legacy-modis")
+	if err != nil || queued.State != "queued" || queued.ID != 1 {
+		t.Fatalf("legacy task missing after migration: %+v %v", queued, err)
+	}
+	if err := state.CompleteWithOfficial(ctx, queued.ID, "/archive/cloud.hdf", "0123456789", 123, "verified", "MD5", "aaaa"); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := state.Task(ctx, queued.ID)
+	if err != nil || verified.OfficialChecksumStatus != "verified" || verified.OfficialChecksumAlgorithm != "MD5" || verified.OfficialChecksumValue != "aaaa" {
+		t.Fatalf("official verification status was not stored: %+v %v", verified, err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err = Open(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	verified, err = state.Task(ctx, queued.ID)
+	if err != nil || verified.OfficialChecksumStatus != "verified" {
+		t.Fatalf("checksum evidence lost across restart: %+v %v", verified, err)
+	}
+}
 
 func TestNewDownloaderStoreDoesNotCreateAccessTables(t *testing.T) {
 	state, err := Open(filepath.Join(t.TempDir(), "queue.sqlite3"))

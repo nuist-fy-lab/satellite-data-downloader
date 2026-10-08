@@ -64,9 +64,12 @@ type DownloadResult struct {
 }
 
 type PromoteResult struct {
-	Path   string
-	Size   int64
-	SHA256 string
+	Path              string
+	Size              int64
+	SHA256            string
+	OfficialAlgorithm string
+	OfficialValue     string
+	OfficialStatus    string
 }
 
 type HTTP struct {
@@ -562,6 +565,12 @@ func (h *HTTP) request(ctx context.Context, locator string, resumeFrom int64, et
 }
 
 func Promote(task model.Task, archiveRoot string, groupWritable ...bool) (PromoteResult, error) {
+	return PromoteWithOfficial(task, archiveRoot, nil, groupWritable...)
+}
+
+// PromoteWithOfficial verifies authoritative provider digests *before* the
+// first archive write; local SHA-256 remains mandatory for every source.
+func PromoteWithOfficial(task model.Task, archiveRoot string, official []OfficialChecksum, groupWritable ...bool) (PromoteResult, error) {
 	name, err := safeName(task.Name)
 	if err != nil {
 		return PromoteResult{}, err
@@ -577,9 +586,21 @@ func Promote(task model.Task, archiveRoot string, groupWritable ...bool) (Promot
 	if err != nil {
 		return PromoteResult{}, err
 	}
-	digest, err := fileSHA256(task.StagingPath)
+	digest, err := sha256AndVerifyOfficial(task.StagingPath, official)
 	if err != nil {
 		return PromoteResult{}, err
+	}
+	verification := PromoteResult{OfficialStatus: "local_only"}
+	if len(official) > 0 {
+		verification.OfficialStatus = "verified"
+		for i, c := range official {
+			if i > 0 {
+				verification.OfficialAlgorithm += ","
+				verification.OfficialValue += ","
+			}
+			verification.OfficialAlgorithm += c.Algorithm
+			verification.OfficialValue += c.Value
+		}
 	}
 
 	targetDir := filepath.Join(archiveRoot, relative)
@@ -600,7 +621,8 @@ func Promote(task model.Task, archiveRoot string, groupWritable ...bool) (Promot
 			return PromoteResult{}, &CollisionError{Path: target}
 		}
 		_ = os.Remove(task.StagingPath)
-		return PromoteResult{Path: target, Size: existing.Size(), SHA256: digest}, nil
+		verification.Path, verification.Size, verification.SHA256 = target, existing.Size(), digest
+		return verification, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return PromoteResult{}, err
 	}
@@ -637,7 +659,8 @@ func Promote(task model.Task, archiveRoot string, groupWritable ...bool) (Promot
 		return PromoteResult{}, err
 	}
 	_ = syncDir(filepath.Dir(task.StagingPath))
-	return PromoteResult{Path: target, Size: info.Size(), SHA256: digest}, nil
+	verification.Path, verification.Size, verification.SHA256 = target, info.Size(), digest
+	return verification, nil
 }
 
 func ensureArchiveDirectory(root, relative string, groupWritable bool) error {

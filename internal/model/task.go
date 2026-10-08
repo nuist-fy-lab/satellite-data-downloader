@@ -20,18 +20,21 @@ type TaskSpec struct {
 type Task struct {
 	ID int64 `json:"id"`
 	TaskSpec
-	State         string    `json:"state"`
-	Attempts      int       `json:"attempts"`
-	NextAttemptAt time.Time `json:"next_attempt_at,omitempty"`
-	ObservedSize  int64     `json:"observed_size,omitempty"`
-	SHA256        string    `json:"sha256,omitempty"`
-	StagingPath   string    `json:"staging_path,omitempty"`
-	ArchivePath   string    `json:"archive_path,omitempty"`
-	LastError     string    `json:"last_error,omitempty"`
-	RequestedAt   time.Time `json:"requested_at"`
-	StartedAt     time.Time `json:"started_at,omitempty"`
-	CompletedAt   time.Time `json:"completed_at,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	State                     string    `json:"state"`
+	Attempts                  int       `json:"attempts"`
+	NextAttemptAt             time.Time `json:"next_attempt_at,omitempty"`
+	ObservedSize              int64     `json:"observed_size,omitempty"`
+	SHA256                    string    `json:"sha256,omitempty"`
+	OfficialChecksumStatus    string    `json:"official_checksum_status,omitempty"`
+	OfficialChecksumAlgorithm string    `json:"official_checksum_algorithm,omitempty"`
+	OfficialChecksumValue     string    `json:"official_checksum_value,omitempty"`
+	StagingPath               string    `json:"staging_path,omitempty"`
+	ArchivePath               string    `json:"archive_path,omitempty"`
+	LastError                 string    `json:"last_error,omitempty"`
+	RequestedAt               time.Time `json:"requested_at"`
+	StartedAt                 time.Time `json:"started_at,omitempty"`
+	CompletedAt               time.Time `json:"completed_at,omitempty"`
+	UpdatedAt                 time.Time `json:"updated_at"`
 }
 
 type ProviderStatus struct {

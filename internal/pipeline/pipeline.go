@@ -29,6 +29,7 @@ type Runtime struct {
 	provider map[string]config.Provider
 	flows    map[string]*providerFlow
 	events   *archiveevent.Notifier
+	official *transfer.OfficialResolver
 	wg       sync.WaitGroup
 }
 
@@ -188,7 +189,8 @@ func New(cfg config.Config, state *store.Store, accessManager *access.Manager) (
 	}
 	return &Runtime{
 		cfg: cfg, store: state, access: accessManager, provider: providers, flows: flows,
-		events: archiveevent.New(cfg.ArchiveEventSocket, state),
+		events:   archiveevent.New(cfg.ArchiveEventSocket, state),
+		official: transfer.NewOfficialResolver(),
 	}, nil
 }
 
@@ -449,7 +451,20 @@ func (r *Runtime) verifyLoop(ctx context.Context, provider config.Provider, work
 		if archiveRoot == "" {
 			archiveRoot = r.cfg.ArchiveRoot
 		}
-		result, err := transfer.Promote(task, archiveRoot, provider.ArchiveRoot != "" || r.cfg.ArchiveGroupWritable)
+		// Metadata requests run only in verification workers, not in the
+		// concurrent download hot path. A metadata outage keeps the staging
+		// file intact for later verification rather than declaring success.
+		var official []transfer.OfficialChecksum
+		if r.official != nil {
+			official, err = r.official.Resolve(ctx, task)
+			if err != nil {
+				slog.Warn("official checksum lookup delayed", "provider", provider.SourceID, "task", task.ID, "error", err)
+				_ = r.store.RetryVerification(context.WithoutCancel(ctx), task.ID, err, retryDelay(max(task.Attempts, 1)))
+				poll.Reset(25 * time.Millisecond)
+				continue
+			}
+		}
+		result, err := transfer.PromoteWithOfficial(task, archiveRoot, official, provider.ArchiveRoot != "" || r.cfg.ArchiveGroupWritable)
 		if err != nil {
 			var collision *transfer.CollisionError
 			if errors.As(err, &collision) {
@@ -467,7 +482,7 @@ func (r *Runtime) verifyLoop(ctx context.Context, provider config.Provider, work
 			poll.Reset(25 * time.Millisecond)
 			continue
 		}
-		if err := r.store.Complete(context.WithoutCancel(ctx), task.ID, result.Path, result.SHA256, result.Size); err != nil {
+		if err := r.store.CompleteWithOfficial(context.WithoutCancel(ctx), task.ID, result.Path, result.SHA256, result.Size, result.OfficialStatus, result.OfficialAlgorithm, result.OfficialValue); err != nil {
 			slog.Warn("checkpoint provider promotion", "provider", provider.SourceID, "task", task.ID, "error", err)
 		} else {
 			r.events.Notify()

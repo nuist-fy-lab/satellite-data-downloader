@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   next_attempt_ns INTEGER NOT NULL DEFAULT 0,
   observed_size INTEGER NOT NULL DEFAULT 0,
   sha256 TEXT NOT NULL DEFAULT '',
+	 official_checksum_status TEXT NOT NULL DEFAULT '',
+	 official_checksum_algorithm TEXT NOT NULL DEFAULT '',
+	 official_checksum_value TEXT NOT NULL DEFAULT '',
   staging_path TEXT NOT NULL DEFAULT '',
   archive_path TEXT NOT NULL DEFAULT '',
   last_error TEXT NOT NULL DEFAULT '',
@@ -76,6 +79,41 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialize downloader state: %w", err)
+	}
+	// Online schema upgrade for existing 11k+ queued jobs; metadata is added
+	// without rebuilding the database or changing existing transfer states.
+	for _, column := range []string{"official_checksum_status", "official_checksum_algorithm", "official_checksum_value"} {
+		var found bool
+		rows, err := db.Query("PRAGMA table_info(tasks)")
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		for rows.Next() {
+			var id, notnull, pk int
+			var name, kind string
+			var defaultValue any
+			if err := rows.Scan(&id, &name, &kind, &notnull, &defaultValue, &pk); err != nil {
+				rows.Close()
+				_ = db.Close()
+				return nil, err
+			}
+			if name == column {
+				found = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			_ = db.Close()
+			return nil, err
+		}
+		rows.Close()
+		if !found {
+			if _, err := db.Exec("ALTER TABLE tasks ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''"); err != nil {
+				_ = db.Close()
+				return nil, err
+			}
+		}
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = db.Close()
@@ -299,6 +337,10 @@ func (s *Store) Redownload(ctx context.Context, id int64, cause error, delay tim
 }
 
 func (s *Store) Complete(ctx context.Context, id int64, archivePath, digest string, size int64) error {
+	return s.CompleteWithOfficial(ctx, id, archivePath, digest, size, "", "", "")
+}
+
+func (s *Store) CompleteWithOfficial(ctx context.Context, id int64, archivePath, digest string, size int64, status, algorithm, value string) error {
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -307,8 +349,8 @@ func (s *Store) Complete(ctx context.Context, id int64, archivePath, digest stri
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE tasks
-		SET state='done',archive_path=?,sha256=?,observed_size=?,staging_path='',completed_at=?,last_error='',updated_at=?
-		WHERE id=?`, archivePath, digest, size, stamp(now), stamp(now), id)
+		SET state='done',archive_path=?,sha256=?,observed_size=?,official_checksum_status=?,official_checksum_algorithm=?,official_checksum_value=?,staging_path='',completed_at=?,last_error='',updated_at=?
+		WHERE id=?`, archivePath, digest, size, status, algorithm, value, stamp(now), stamp(now), id)
 	if err != nil {
 		return err
 	}
@@ -481,7 +523,8 @@ func (s *Store) StateCounts(ctx context.Context, sourceID string) (map[string]in
 
 const taskSelect = `
 SELECT id,task_key,source_id,collection_id,granule_id,asset_id,filename,url,auth_ref,relative_dir,
-       expected_size,etag,media_type,state,attempts,next_attempt_ns,observed_size,sha256,staging_path,
+       expected_size,etag,media_type,state,attempts,next_attempt_ns,observed_size,sha256,
+       official_checksum_status,official_checksum_algorithm,official_checksum_value,staging_path,
        archive_path,last_error,requested_at,started_at,completed_at,updated_at
 FROM tasks`
 
@@ -496,7 +539,8 @@ func scanTask(row scanner) (model.Task, error) {
 	err := row.Scan(
 		&task.ID, &task.Key, &task.SourceID, &task.CollectionID, &task.GranuleID, &task.AssetID,
 		&task.Name, &task.URL, &task.AuthRef, &task.RelativeDir, &task.Size, &task.ETag, &task.MediaType,
-		&task.State, &task.Attempts, &nextAttemptNS, &task.ObservedSize, &task.SHA256, &task.StagingPath,
+		&task.State, &task.Attempts, &nextAttemptNS, &task.ObservedSize, &task.SHA256,
+		&task.OfficialChecksumStatus, &task.OfficialChecksumAlgorithm, &task.OfficialChecksumValue, &task.StagingPath,
 		&task.ArchivePath, &task.LastError, &requested, &started, &completed, &updated,
 	)
 	if err != nil {
@@ -506,6 +550,10 @@ func scanTask(row scanner) (model.Task, error) {
 	task.StartedAt = parseStamp(started)
 	task.CompletedAt = parseStamp(completed)
 	task.UpdatedAt = parseStamp(updated)
+	if task.State == "done" && task.OfficialChecksumStatus == "" {
+		// Do not present pre-upgrade archives as officially verified.
+		task.OfficialChecksumStatus = "legacy_local_only"
+	}
 	if nextAttemptNS > 0 {
 		task.NextAttemptAt = time.Unix(0, nextAttemptNS).UTC()
 	}

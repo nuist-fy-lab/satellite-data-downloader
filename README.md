@@ -187,6 +187,29 @@ Archive promotion is conservative:
 - completed archive events remain in a SQLite outbox until acknowledged by the
   centre, so a temporary centre outage does not lose completion state.
 
+### Official checksums and local SHA-256
+
+Local SHA-256 always protects staged caches and archived copies. When the
+provider has a verified public file-level checksum API, independent verification
+workers query official metadata before promoting the file:
+
+| Provider | Authoritative file check | Metadata API |
+| --- | --- | --- |
+| MODIS / VIIRS / CALIPSO | MD5 | NASA CMR UMM-G, matching granule and filename |
+| GOES | MD5 and CRC32C (both checked) | Google Cloud Storage object JSON |
+| MTG | MD5 | EUMETSAT Browse product detail |
+| Himawari-9 | Full-object CRC32 / CRC32C / SHA-1 / SHA-256 as actually returned | S3 HEAD with checksum mode |
+| Himawari-8 / EarthCARE / CloudSat / ERA5 | No confirmed full-file checksum exposed by current data interfaces | Local SHA-256 only, never treating ETags as MD5 |
+
+Metadata lookups use public direct routes and run **only in verification
+workers**, without consuming download connections. Already-queued tasks benefit
+without re-enqueueing. Completion records distinguish `verified` (official
+checksum matched), `local_only` (no available official checksum), and
+`legacy_local_only` (older completed records not retrospectively checked).
+Temporary checksum API outages retry verification without redownloading;
+checksum mismatches block promotion and schedule a clean redownload. SHA-256 and
+all authoritative digests are computed in a single pass over the staged file.
+
 Shared archive roots create group-writable files/directories when configured for
 shared operation. Provider-specific archive roots override the general archive
 root.
