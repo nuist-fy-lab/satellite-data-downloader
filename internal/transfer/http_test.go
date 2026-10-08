@@ -54,7 +54,11 @@ func TestRoundedCMRGranuleSizeUsesOriginLength(t *testing.T) {
 				t.Fatalf("transfer result=%+v err=%v", result, err)
 			}
 			task.StagingPath = result.Path
-			promoted, err := Promote(task, filepath.Join(root, "archive"))
+			archive := filepath.Join(root, "archive")
+			if err := os.MkdirAll(archive, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			promoted, err := Promote(task, archive)
 			if err != nil || promoted.Size != int64(len(body)) {
 				t.Fatalf("archive result=%+v err=%v", promoted, err)
 			}
