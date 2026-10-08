@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -318,14 +316,14 @@ func (r *Runtime) transferLoop(ctx context.Context, provider config.Provider, wo
 			if errors.Is(err, access.ErrNoRoute) {
 				_ = r.store.WaitForAuth(context.WithoutCancel(ctx), task.ID, fmt.Errorf("%s access route is not configured", provider.SourceID))
 			} else {
-				_ = r.store.RetryTransfer(context.WithoutCancel(ctx), task.ID, err, retryDelay(task.Attempts))
+				r.scheduleTransferRetry(ctx, provider.SourceID, task, err)
 			}
 			poll.Reset(25 * time.Millisecond)
 			continue
 		}
 		if err := flow.pace(ctx); err != nil {
 			flow.finish(false, false, provider.TransferConcurrency)
-			_ = r.store.RetryTransfer(context.WithoutCancel(ctx), task.ID, err, time.Second)
+			r.scheduleTransferRetry(ctx, provider.SourceID, task, err)
 			return
 		}
 		transferClient := route.Transfer
@@ -381,7 +379,7 @@ func (r *Runtime) handleTransferError(ctx context.Context, provider config.Provi
 	if isCredentialFailure(cause) {
 		r.access.MarkAuthFailure(context.WithoutCancel(ctx), route, cause.Error())
 		if r.access.HasUsableRoute(ctx, provider.SourceID, provider.AuthRef, provider.RequestTimeout) {
-			_ = r.store.RetryTransfer(context.WithoutCancel(ctx), task.ID, cause, time.Second)
+			r.scheduleTransferRetry(ctx, provider.SourceID, task, cause)
 		} else {
 			_ = r.store.WaitForAuth(context.WithoutCancel(ctx), task.ID, cause)
 		}
@@ -392,25 +390,35 @@ func (r *Runtime) handleTransferError(ctx context.Context, provider config.Provi
 		if provider.AuthRef != "" && (httpErr.Status == http.StatusUnauthorized || httpErr.Status == http.StatusForbidden) {
 			r.access.MarkAuthFailure(context.WithoutCancel(ctx), route, cause.Error())
 			if r.access.HasUsableRoute(ctx, provider.SourceID, provider.AuthRef, provider.RequestTimeout) {
-				_ = r.store.RetryTransfer(context.WithoutCancel(ctx), task.ID, cause, time.Second)
+				r.scheduleTransferRetry(ctx, provider.SourceID, task, cause)
 			} else {
 				_ = r.store.WaitForAuth(context.WithoutCancel(ctx), task.ID, cause)
 			}
-			return
-		}
-		if httpErr.Status == http.StatusNotFound || httpErr.Status == http.StatusGone {
-			_ = r.store.Fail(context.WithoutCancel(ctx), task.ID, cause)
 			return
 		}
 	}
 	if route.ProxyID != nil {
 		r.access.MarkProxyFailure(context.WithoutCancel(ctx), route, cause.Error())
 	}
-	delay := retryDelay(task.Attempts)
-	if httpErr != nil && httpErr.RetryAfter > delay {
-		delay = httpErr.RetryAfter
+	r.scheduleTransferRetry(ctx, provider.SourceID, task, cause)
+}
+
+func (r *Runtime) scheduleTransferRetry(ctx context.Context, source string, task model.Task, cause error) {
+	decision := transferRetryDecision(task.Attempts, cause)
+	if decision.terminal {
+		slog.Warn("stop retrying unavailable or invalid download", "provider", source,
+			"task", task.ID, "attempts", task.Attempts, "reason", decision.reason, "error", cause)
+		if err := r.store.Fail(context.WithoutCancel(ctx), task.ID, cause); err != nil {
+			slog.Error("persist terminal download failure", "provider", source, "task", task.ID, "error", err)
+		}
+		return
 	}
-	_ = r.store.RetryTransfer(context.WithoutCancel(ctx), task.ID, cause, delay)
+	if err := r.store.RetryTransfer(context.WithoutCancel(ctx), task.ID, cause, decision.delay); err != nil {
+		slog.Error("persist scheduled download retry", "provider", source, "task", task.ID, "error", err)
+		return
+	}
+	slog.Info("schedule download retry", "provider", source, "task", task.ID,
+		"attempt", task.Attempts, "delay", decision.delay, "error", cause)
 }
 
 func isCredentialFailure(err error) bool {
@@ -466,19 +474,6 @@ func (r *Runtime) verifyLoop(ctx context.Context, provider config.Provider, work
 		}
 		poll.Reset(10 * time.Millisecond)
 	}
-}
-
-func retryDelay(attempt int) time.Duration {
-	if attempt < 1 {
-		attempt = 1
-	}
-	exponent := min(attempt-1, 7)
-	seconds := 5 * math.Pow(2, float64(exponent))
-	delay := time.Duration(seconds) * time.Second
-	if delay > 10*time.Minute {
-		delay = 10 * time.Minute
-	}
-	return delay + time.Duration(rand.Int64N(int64(delay/2)+1))
 }
 
 func isCongestion(err error) bool {

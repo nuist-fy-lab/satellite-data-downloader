@@ -84,10 +84,19 @@ HTTP 408/429/5xx responses reduce adaptive concurrency and can extend the gap up
 to 5 seconds. Sustained success gradually restores concurrency and can reduce the
 gap to 100 ms.
 
-`Retry-After` is respected for provider-wide starts, capped at one hour. Individual
-task retries remain durable and use jittered exponential backoff.
+`Retry-After` is respected for provider-wide starts, capped at one hour. All
+satellite products use the same durable, equal-jitter exponential backoff for
+download retries: 5s, 10s, 20s, 40s, etc. with a 10-minute capped baseline
+and a randomized delay in [50%, 100%] of that baseline. A server-provided
+`Retry-After` is treated as a minimum, with small extra jitter.
 
-GOES starts at four transfers and can adapt up to its default ceiling of eight.
+HTTP 404/410 results are rechecked for up to **six actual download attempts**
+before becoming terminal failures. Temporary network errors, 429, 5xx and
+central gateway outages continue retrying with capped backoff. Invalid
+requests (e.g. 400/422) fail immediately; exhausted or unavailable credentials
+use the separate waiting-for-auth flow.
+
+GOES and MODIS start at four transfers and can adapt up to their ceiling of eight.
 Other providers normally start at their configured ceiling. The initial value can
 be overridden with `SATDOWN_<PROVIDER>_INITIAL_TRANSFER_CONCURRENCY`.
 
@@ -162,7 +171,8 @@ archive-event outbox
   └── retained until satellite-data acknowledges it
 ```
 
-HTTP 404/410 responses fail the asset rather than retrying it forever. Credential
+HTTP 404/410 responses are retried with jittered exponential backoff up to six
+times before the asset is marked failed. Credential
 and route failures are handled separately from ordinary transient network errors.
 
 ## Archive safety
