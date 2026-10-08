@@ -79,7 +79,10 @@ func TestMODISAdaptiveFourToEightAndComparedRecyclingPolicies(t *testing.T) {
 	} {
 		t.Run(tc.profile, func(t *testing.T) {
 			t.Setenv("SATDOWN_MODIS_LOW_THROUGHPUT_PROFILE", tc.profile)
-			t.Setenv("SATDOWN_MODIS_LOW_THROUGHPUT_ENABLED", "")
+			// The previously compared policies remain opt-in for controlled
+			// experiments; mandatory low-speed recycling is unsafe during
+			// sustained LAADS-wide low throughput.
+			t.Setenv("SATDOWN_MODIS_LOW_THROUGHPUT_ENABLED", "true")
 			t.Setenv("SATDOWN_MODIS_TRANSFER_CONCURRENCY", "")
 			for _, p := range Load().Providers {
 				if p.SourceID != "modis" {
@@ -96,6 +99,19 @@ func TestMODISAdaptiveFourToEightAndComparedRecyclingPolicies(t *testing.T) {
 			t.Fatal("MODIS missing")
 		})
 	}
+}
+
+func TestMODISDoesNotRecycleAllSlowButProgressingStreamsByDefault(t *testing.T) {
+	t.Setenv("SATDOWN_MODIS_LOW_THROUGHPUT_ENABLED", "")
+	for _, provider := range Load().Providers {
+		if provider.SourceID == "modis" {
+			if provider.LowThroughput.Enabled || provider.InitialTransferConcurrency != 4 || provider.TransferConcurrency != 8 {
+				t.Fatalf("unsafe LAADS watchdog or wrong adaptive limits: %+v", provider)
+			}
+			return
+		}
+	}
+	t.Fatal("MODIS source missing")
 }
 
 func TestERA5WorkerUsesCentreIPC(t *testing.T) {
