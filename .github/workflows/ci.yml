@@ -52,6 +52,7 @@ jobs:
         run: |
           mkdir -p dist
           go build -trimpath -ldflags='-s -w' -o dist/satellite-data-downloader ./cmd/satellite-data-downloader
+          go build -trimpath -ldflags='-s -w' -o dist/satellite-checksum-sidecar ./cmd/satellite-checksum-sidecar
       - name: Publish and verify PR binary
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         env:
@@ -61,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="ci-pr-${PR_NUMBER}-${SOURCE_SHA:0:12}"
-          gh release create "$tag" dist/satellite-data-downloader --repo "$GITHUB_REPOSITORY" \
+          gh release create "$tag" dist/satellite-data-downloader dist/satellite-checksum-sidecar --repo "$GITHUB_REPOSITORY" \
             --target "$SOURCE_SHA" --title "CI PR ${PR_NUMBER} ${SOURCE_SHA:0:12}" \
             --notes "Cloud-verified PR binary for $SOURCE_SHA" --prerelease
           mkdir -p verify
@@ -69,12 +70,15 @@ jobs:
           target="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .target_commitish)"
           [[ "$target" == "$SOURCE_SHA" ]]
           cmp dist/satellite-data-downloader verify/satellite-data-downloader
-          digest="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.assets[] | select(.name=="satellite-data-downloader") | .digest')"
-          [[ "$digest" == "sha256:$(sha256sum verify/satellite-data-downloader | cut -d' ' -f1)" ]]
+          for executable in satellite-data-downloader satellite-checksum-sidecar; do
+            cmp "dist/$executable" "verify/$executable"
+            digest="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq ".assets[] | select(.name==\"$executable\") | .digest")"
+            [[ "$digest" == "sha256:$(sha256sum "verify/$executable" | cut -d' ' -f1)" ]]
+          done
       - name: Publish rolling CI binary
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete ci-latest --yes --cleanup-tag || true
-          gh release create ci-latest dist/satellite-data-downloader --target "$GITHUB_SHA" --title "CI latest" --notes "Rolling CI build for $GITHUB_SHA" --prerelease
+          gh release create ci-latest dist/satellite-data-downloader dist/satellite-checksum-sidecar --target "$GITHUB_SHA" --title "CI latest" --notes "Rolling CI build for $GITHUB_SHA" --prerelease

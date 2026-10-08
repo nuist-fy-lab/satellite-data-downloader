@@ -190,6 +190,23 @@ HTTP 404 / 410 会进行最多 6 次带随机抖动的指数退避确认；持�
 - 完整性失败会删除损坏的暂存文件并安排重新下载；
 - 完成事件持久保存在 SQLite outbox（发件箱）中，直到中心明确确认。
 
+### 历史文件旁路复核（Sidecar）
+
+历史归档由独立 `satellite-checksum-sidecar` 进程负责，不使用下载器的传输、
+校验 Worker，也不把下载与历史扫描排成一条串行队列。Sidecar 只读访问现有
+`downloader.sqlite3`，它自己的断点、异常和重试状态保存在
+`~/.local/state/satellite-data-checksum-sidecar/audit.sqlite3`。
+校验成功后，通过本地 Unix socket 仅补充已经完成的记录的官方校验字段，
+**不改下载状态、路径、文件 SHA-256 或正式文件内容**。
+
+默认单线程、最多 8 MiB/s 归档读取速率、官方元数据间隔至少 500 ms，
+并设置低 CPU／磁盘 IO 优先级。中断后从检查点续跑；远端元数据故障单独退避，
+已归档文件丢失、大小不一致或 SHA-256／官方校验不匹配记录为
+`missing`／`mismatch`，由人工排查，不自动删除、覆盖或重新下载历史文件。
+旧版记录即使没有官方校验码，也重新核算本地 SHA-256，随后记录
+`local_only`。可以使用 `deploy/systemd/satellite-checksum-sidecar.service`
+作为独立用户服务安装运行，完全不依赖 ChatGPT 云端任务。
+
 因此，即使中心服务临时不可用，也不会丢失已经完成的归档通知。
 
 ### 官方校验码与本地 SHA-256

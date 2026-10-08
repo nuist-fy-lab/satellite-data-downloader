@@ -368,6 +368,46 @@ func (s *Store) CompleteWithOfficial(ctx context.Context, id int64, archivePath,
 	return tx.Commit()
 }
 
+// RecordArchiveAudit updates checksum evidence only. The sidecar is never
+// allowed to change the download state, SHA-256, archived file path or
+// completion event. The expected local SHA-256 and archive path act as an
+// optimistic concurrency guard against races with ordinary downloads.
+func (s *Store) RecordArchiveAudit(ctx context.Context, id int64, archivePath, digest, status, algorithm, value string) error {
+	if id <= 0 || archivePath == "" || len(digest) != 64 ||
+		(status != "verified" && status != "local_only") ||
+		(status == "verified" && (algorithm == "" || value == "")) ||
+		(status == "local_only" && (algorithm != "" || value != "")) {
+		return errors.New("invalid archived checksum audit")
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET official_checksum_status=?,
+			official_checksum_algorithm=?,official_checksum_value=?
+		WHERE id=? AND state='done' AND official_checksum_status=''
+		AND archive_path=? AND sha256=?`,
+		status, algorithm, value, id, archivePath, digest)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		// A successful sidecar write may be acknowledged by the downloader
+		// just before the sidecar itself crashes. Accept an exact replay so
+		// retrying a result never marks valid archived files as stale.
+		var existingStatus, existingAlgorithm, existingValue string
+		err := s.db.QueryRowContext(ctx, `SELECT official_checksum_status,official_checksum_algorithm,official_checksum_value
+			FROM tasks WHERE id=? AND state='done' AND archive_path=? AND sha256=?`,
+			id, archivePath, digest).Scan(&existingStatus, &existingAlgorithm, &existingValue)
+		if err == nil && existingStatus == status && existingAlgorithm == algorithm && existingValue == value {
+			return nil
+		}
+		return errors.New("archive audit rejected: stale task or different verification evidence")
+	}
+	return nil
+}
+
 func (s *Store) PendingArchiveEvents(ctx context.Context, limit int) ([]model.Task, error) {
 	rows, err := s.db.QueryContext(ctx, taskSelect+`
 		WHERE state='done' AND id IN (SELECT task_id FROM archive_event_outbox WHERE next_attempt_ns<=?)

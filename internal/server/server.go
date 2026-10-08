@@ -29,12 +29,41 @@ func New(state *store.Store, runtime *pipeline.Runtime) http.Handler {
 	mux.HandleFunc("POST /v1/tasks/status", s.taskStatuses)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.task)
 	mux.HandleFunc("POST /v1/tasks/{id}/retry", s.retry)
+	mux.HandleFunc("POST /v1/tasks/{id}/archive-audit", s.archiveAudit)
 	for _, path := range []string{"/v1/access", "/v1/credentials", "/v1/credentials/{id}", "/v1/proxies", "/v1/proxies/{id}", "/v1/accounts", "/v1/accounts/{id}"} {
 		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusGone, errors.New("access management moved to satellite-data centre"))
 		})
 	}
 	return withHeaders(mux)
+}
+
+// archiveAudit is available only via the downloader's protected local Unix
+// socket. Historic checksum Sidecar results are persisted without changing
+// any task scheduling or joining the live transfer/verification worker pools.
+func (s *Server) archiveAudit(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var payload struct {
+		ArchivePath string `json:"archive_path"`
+		SHA256      string `json:"sha256"`
+		Status      string `json:"status"`
+		Algorithm   string `json:"algorithm"`
+		Value       string `json:"value"`
+	}
+	if err := decodeJSON(w, r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.RecordArchiveAudit(r.Context(), id, payload.ArchivePath, payload.SHA256,
+		payload.Status, payload.Algorithm, payload.Value); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
 }
 
 func (s *Server) taskStatuses(w http.ResponseWriter, r *http.Request) {

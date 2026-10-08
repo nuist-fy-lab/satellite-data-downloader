@@ -1,0 +1,21 @@
+[Unit]
+Description=Satellite historical checksum audit sidecar (independent from live downloads)
+After=satellite-data-downloader.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/satellite-checksum-sidecar --read-mibps=8 --metadata-interval=500ms
+Restart=on-failure
+RestartSec=30s
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=10
+IOWeight=10
+MemoryMax=512M
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

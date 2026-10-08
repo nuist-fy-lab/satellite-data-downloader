@@ -281,6 +281,14 @@ func parseOfficialBase64(algorithm, value string) (OfficialChecksum, error) {
 // sha256AndVerifyOfficial hashes the file once for both local SHA-256 and all
 // official checksums. A mismatch blocks archival promotion.
 func sha256AndVerifyOfficial(filename string, checks []OfficialChecksum) (string, error) {
+	return VerifyArchivedFile(filename, checks, 0)
+}
+
+// VerifyArchivedFile reads a completed archive without modifying it.
+// bandwidthBytesPerSecond=0 disables throttling (for normal verification
+// workers). Historical sidecars set a low limit to avoid competing with live
+// downloads for the shared GPFS archive bandwidth.
+func VerifyArchivedFile(filename string, checks []OfficialChecksum, bandwidthBytesPerSecond int64) (string, error) {
 	file, err := os.Open(filename)
 	if err != nil {
 		return "", err
@@ -297,8 +305,30 @@ func sha256AndVerifyOfficial(filename string, checks []OfficialChecksum) (string
 		verification = append(verification, h)
 		writers = append(writers, h)
 	}
-	if _, err := io.CopyBuffer(io.MultiWriter(writers...), file, make([]byte, 1<<20)); err != nil {
-		return "", err
+	writer := io.MultiWriter(writers...)
+	buffer := make([]byte, 256<<10)
+	started := time.Now()
+	var readTotal int64
+	for {
+		n, readErr := file.Read(buffer)
+		if n > 0 {
+			if _, err := writer.Write(buffer[:n]); err != nil {
+				return "", err
+			}
+			readTotal += int64(n)
+			if bandwidthBytesPerSecond > 0 {
+				minimumElapsed := time.Duration(float64(readTotal) / float64(bandwidthBytesPerSecond) * float64(time.Second))
+				if remaining := minimumElapsed - time.Since(started); remaining > 0 {
+					time.Sleep(remaining)
+				}
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return "", readErr
+		}
 	}
 	for i, check := range checks {
 		if hex.EncodeToString(verification[i].Sum(nil)) != strings.ToLower(check.Value) {

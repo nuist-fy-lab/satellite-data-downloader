@@ -187,6 +187,27 @@ Archive promotion is conservative:
 - completed archive events remain in a SQLite outbox until acknowledged by the
   centre, so a temporary centre outage does not lose completion state.
 
+### Historical checksum audit sidecar
+
+The separate `satellite-checksum-sidecar` process re-audits already completed
+archives without taking a download/verification worker or serializing live
+downloads with historical verification. It reads the downloader's SQLite
+database in **read-only mode** and maintains its own checkpoint, independent
+backoff and mismatch records in
+`~/.local/state/satellite-data-checksum-sidecar/audit.sqlite3`.
+Verified evidence is recorded through the protected downloader Unix socket;
+only checksum evidence on an already-completed task may change, never its
+download state, archive path, original SHA-256, or stored bytes.
+
+By default the sidecar uses one scanner, caps archive reads at 8 MiB/s, spaces
+public metadata requests by at least 500 ms and runs at low CPU/I/O priority
+(see `deploy/systemd/satellite-checksum-sidecar.service`). Metadata outages
+are retried independently. Missing or inconsistent archives are recorded as
+`missing` or `mismatch` for manual investigation: the sidecar never deletes,
+overwrites, or redownloads a historical file. Archives without authoritative
+checksums are still checked against their original local SHA-256 and marked
+`local_only`. No cloud scheduled tasks are used.
+
 ### Official checksums and local SHA-256
 
 Local SHA-256 always protects staged caches and archived copies. When the
