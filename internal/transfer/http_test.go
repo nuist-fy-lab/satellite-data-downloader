@@ -34,7 +34,7 @@ func TestParseContentRange(t *testing.T) {
 	}
 }
 
-func TestRoundedCMRGranuleSizeUsesOriginLength(t *testing.T) {
+func TestAllProvidersIgnoreCatalogByteCountAsIntegrityEvidence(t *testing.T) {
 	const body = "downloaded MODIS cloud granule"
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"modis-object"`)
@@ -42,7 +42,7 @@ func TestRoundedCMRGranuleSizeUsesOriginLength(t *testing.T) {
 	}))
 	defer server.Close()
 
-	for _, source := range []string{"modis", "viirs"} {
+	for _, source := range []string{"modis", "viirs", "goes", "earthcare", "era5", "himawari"} {
 		t.Run(source, func(t *testing.T) {
 			root := t.TempDir()
 			task := model.Task{ID: 1, TaskSpec: model.TaskSpec{
@@ -66,18 +66,49 @@ func TestRoundedCMRGranuleSizeUsesOriginLength(t *testing.T) {
 	}
 }
 
-func TestExactCatalogSizeStillEnforcedForOtherProviders(t *testing.T) {
+func TestCompletedDownloadCacheRequiresMatchingSHA256(t *testing.T) {
+	requests := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("ETag", `"stable-object"`)
+		_, _ = w.Write([]byte("valid content"))
+	}))
+	defer server.Close()
+	task := model.Task{ID: 2, TaskSpec: model.TaskSpec{SourceID: "goes", Name: "file.nc", URL: server.URL, Size: 900}}
+	root := t.TempDir()
+	client := NewHTTP(server.Client())
+	first, err := client.Download(context.Background(), task, root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Download(context.Background(), task, root, nil); err != nil || requests != 1 {
+		t.Fatalf("verified downloaded file should be reused: requests=%d err=%v", requests, err)
+	}
+	if err := os.WriteFile(first.Path, []byte("other content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.Download(context.Background(), task, root, nil)
+	if err != nil || requests != 2 {
+		t.Fatalf("same-size corrupted staging must be redownloaded: requests=%d err=%v", requests, err)
+	}
+	data, err := os.ReadFile(second.Path)
+	if err != nil || string(data) != "valid content" {
+		t.Fatalf("redownloaded content=%q err=%v", data, err)
+	}
+}
+
+func TestTransferRejectsTruncatedHTTPResponseRegardlessOfCatalogMetadata(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "900")
 		_, _ = w.Write([]byte("content"))
 	}))
 	defer server.Close()
 	task := model.Task{ID: 2, TaskSpec: model.TaskSpec{
-		SourceID: "goes", Name: "file.nc", URL: server.URL, Size: 900,
+		SourceID: "goes", Name: "file.nc", URL: server.URL, Size: 7,
 	}}
 	_, err := NewHTTP(server.Client()).Download(context.Background(), task, t.TempDir(), nil)
-	var integrity *IntegrityError
-	if !errors.As(err, &integrity) || integrity.Detail != "origin Content-Length does not match catalog" {
-		t.Fatalf("expected strict size validation, got %v", err)
+	if err == nil {
+		t.Fatal("truncated HTTP response was accepted")
 	}
 }
 
