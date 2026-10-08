@@ -34,6 +34,49 @@ func TestParseContentRange(t *testing.T) {
 	}
 }
 
+func TestRoundedCMRGranuleSizeUsesOriginLength(t *testing.T) {
+	const body = "downloaded MODIS cloud granule"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"modis-object"`)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	for _, source := range []string{"modis", "viirs"} {
+		t.Run(source, func(t *testing.T) {
+			root := t.TempDir()
+			task := model.Task{ID: 1, TaskSpec: model.TaskSpec{
+				SourceID: source, Name: "cloud.hdf", URL: server.URL,
+				RelativeDir: "Aqua/MODIS/L2/2023/01/01", Size: int64(len(body) + 1024),
+			}}
+			result, err := NewHTTP(server.Client()).Download(context.Background(), task, root, nil)
+			if err != nil || result.Size != int64(len(body)) {
+				t.Fatalf("transfer result=%+v err=%v", result, err)
+			}
+			task.StagingPath = result.Path
+			promoted, err := Promote(task, filepath.Join(root, "archive"))
+			if err != nil || promoted.Size != int64(len(body)) {
+				t.Fatalf("archive result=%+v err=%v", promoted, err)
+			}
+		})
+	}
+}
+
+func TestExactCatalogSizeStillEnforcedForOtherProviders(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("content"))
+	}))
+	defer server.Close()
+	task := model.Task{ID: 2, TaskSpec: model.TaskSpec{
+		SourceID: "goes", Name: "file.nc", URL: server.URL, Size: 900,
+	}}
+	_, err := NewHTTP(server.Client()).Download(context.Background(), task, t.TempDir(), nil)
+	var integrity *IntegrityError
+	if !errors.As(err, &integrity) || integrity.Detail != "origin Content-Length does not match catalog" {
+		t.Fatalf("expected strict size validation, got %v", err)
+	}
+}
+
 func TestPromoteDoesNotReplaceDifferentArchiveContent(t *testing.T) {
 	root := t.TempDir()
 	staging := filepath.Join(root, "staging")

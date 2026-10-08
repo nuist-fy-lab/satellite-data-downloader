@@ -75,6 +75,17 @@ type HTTP struct {
 	lowThroughput LowThroughputPolicy
 }
 
+// exactCatalogSize returns only byte counts that can safely be treated as
+// authoritative. NASA CMR GranuleSize for MODIS/VIIRS is rounded in MiB.
+func exactCatalogSize(task model.Task) int64 {
+	switch task.SourceID {
+	case "modis", "viirs":
+		return 0
+	default:
+		return task.Size
+	}
+}
+
 func NewHTTP(timeoutClient *http.Client, idleTimeout ...time.Duration) *HTTP {
 	if timeoutClient == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -327,8 +338,11 @@ func (h *HTTP) Download(ctx context.Context, task model.Task, downloadRoot strin
 	metaPath := partPath + ".json"
 	readyPath := filepath.Join(dir, name+".downloaded")
 
+	// CMR publishes rounded MiB values for MODIS and VIIRS, not exact bytes.
+	// For these providers, use the origin's byte counts for integrity checks.
+	expectedSize := exactCatalogSize(task)
 	if info, err := os.Stat(readyPath); err == nil {
-		if task.Size <= 0 || info.Size() == task.Size {
+		if expectedSize <= 0 || info.Size() == expectedSize {
 			return DownloadResult{Path: readyPath, Size: info.Size()}, nil
 		}
 		if err := os.Remove(readyPath); err != nil {
@@ -344,7 +358,7 @@ func (h *HTTP) Download(ctx context.Context, task model.Task, downloadRoot strin
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return DownloadResult{}, err
 	}
-	if task.Size > 0 && resumeFrom > task.Size {
+	if expectedSize > 0 && resumeFrom > expectedSize {
 		if err := discardPart(partPath, metaPath); err != nil {
 			return DownloadResult{}, err
 		}
@@ -354,7 +368,7 @@ func (h *HTTP) Download(ctx context.Context, task model.Task, downloadRoot strin
 	if resumeFrom > 0 {
 		data, err := os.ReadFile(metaPath)
 		if err != nil || json.Unmarshal(data, &identity) != nil || !strongETag(identity.ETag) ||
-			identity.URLHash != urlHash(task.URL) || (task.Size > 0 && identity.Size != task.Size) ||
+			identity.URLHash != urlHash(task.URL) || (expectedSize > 0 && identity.Size != expectedSize) ||
 			(strongETag(task.ETag) && identity.ETag != task.ETag) {
 			if err := discardPart(partPath, metaPath); err != nil {
 				return DownloadResult{}, err
@@ -397,7 +411,7 @@ func (h *HTTP) Download(ctx context.Context, task model.Task, downloadRoot strin
 		return DownloadResult{}, &IntegrityError{Detail: "origin ETag does not match catalog"}
 	}
 
-	remoteSize := task.Size
+	remoteSize := expectedSize
 	appendMode := resumeFrom > 0 && resp.StatusCode == http.StatusPartialContent
 	var rangeEnd int64
 	if resp.StatusCode == http.StatusPartialContent {
@@ -412,7 +426,7 @@ func (h *HTTP) Download(ctx context.Context, task model.Task, downloadRoot strin
 			return DownloadResult{}, &IntegrityError{Detail: "origin changed ETag while resuming"}
 		}
 		rangeEnd = end
-		if total == 0 && task.Size == 0 {
+		if total == 0 && expectedSize == 0 {
 			return DownloadResult{}, &IntegrityError{Detail: "origin did not specify complete object length"}
 		}
 		if total > 0 {
@@ -554,7 +568,7 @@ func Promote(task model.Task, archiveRoot string, groupWritable ...bool) (Promot
 	if err != nil {
 		return PromoteResult{}, err
 	}
-	if task.Size > 0 && info.Size() != task.Size {
+	if expectedSize := exactCatalogSize(task); expectedSize > 0 && info.Size() != expectedSize {
 		return PromoteResult{}, &IntegrityError{Detail: fmt.Sprintf("staging size %d does not match expected size %d", info.Size(), task.Size)}
 	}
 	digest, err := fileSHA256(task.StagingPath)
