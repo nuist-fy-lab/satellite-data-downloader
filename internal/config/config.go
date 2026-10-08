@@ -21,6 +21,7 @@ type Provider struct {
 }
 
 type LowThroughputPolicy struct {
+	Profile             string
 	Enabled             bool
 	StartupGrace        time.Duration
 	Window              time.Duration
@@ -48,7 +49,8 @@ func Load() Config {
 		provider("goes", true, 4, 8, 2, 3*time.Minute, ""),
 		provider("himawari8", true, 1, 1, 1, 3*time.Minute, ""),
 		provider("himawari9", true, 1, 1, 1, 3*time.Minute, ""),
-		provider("modis", true, 4, 4, 2, 5*time.Minute, "laads"),
+		// Begin with 4 and let AIMD expand to 8 when LAADS stays healthy.
+		provider("modis", true, 4, 8, 2, 5*time.Minute, "laads"),
 		provider("viirs", true, 4, 4, 2, 5*time.Minute, "laads"),
 		provider("mtg", true, 2, 2, 1, 10*time.Minute, "eumetsat"),
 		provider("earthcare", true, 2, 2, 1, 10*time.Minute, "earthcare"),
@@ -78,7 +80,24 @@ func runtimeRoot(home string) string {
 func provider(source string, enabled bool, initialTransfers, maxTransfers, verifiers int, timeout time.Duration, authRef string) Provider {
 	prefix := "SATDOWN_" + strings.ToUpper(strings.ReplaceAll(source, "-", "_"))
 	transferConcurrency := envInt(prefix+"_TRANSFER_CONCURRENCY", maxTransfers, 1, 32)
-	lowThroughputDefault := source == "goes"
+	lowThroughputDefault := source == "goes" || source == "modis"
+	profile := "default"
+	grace, window, sustain := 30*time.Second, 30*time.Second, 45*time.Second
+	floor, fraction := int64(64<<10), 0.15
+	if source == "modis" {
+		// Both arms use the same adaptive concurrency and transfer pipeline.
+		profile = strings.ToLower(env(prefix+"_LOW_THROUGHPUT_PROFILE", "conservative"))
+		if profile != "normal" {
+			profile = "conservative"
+		}
+		if profile == "normal" {
+			grace, window, sustain = 45*time.Second, 30*time.Second, 45*time.Second
+			floor, fraction = 128<<10, 0.25
+		} else {
+			grace, window, sustain = 90*time.Second, 60*time.Second, 120*time.Second
+			floor, fraction = 64<<10, 0.12
+		}
+	}
 	return Provider{
 		SourceID:                   source,
 		ArchiveRoot:                strings.TrimSpace(os.Getenv(prefix + "_ARCHIVE_ROOT")),
@@ -88,12 +107,13 @@ func provider(source string, enabled bool, initialTransfers, maxTransfers, verif
 		VerifyConcurrency:          envInt(prefix+"_VERIFY_CONCURRENCY", verifiers, 1, 32),
 		RequestTimeout:             envDuration(prefix+"_REQUEST_TIMEOUT", timeout),
 		LowThroughput: LowThroughputPolicy{
+			Profile:             profile,
 			Enabled:             envBool(prefix+"_LOW_THROUGHPUT_ENABLED", lowThroughputDefault),
-			StartupGrace:        envDuration(prefix+"_LOW_THROUGHPUT_STARTUP_GRACE", 30*time.Second),
-			Window:              envDuration(prefix+"_LOW_THROUGHPUT_WINDOW", 30*time.Second),
-			Sustain:             envDuration(prefix+"_LOW_THROUGHPUT_SUSTAIN", 45*time.Second),
-			FloorBytesPerSecond: envInt64(prefix+"_LOW_THROUGHPUT_FLOOR_BPS", 64<<10, 1, 1<<40),
-			BaselineFraction:    envFloat(prefix+"_LOW_THROUGHPUT_BASELINE_FRACTION", 0.15, 0.01, 1),
+			StartupGrace:        envDuration(prefix+"_LOW_THROUGHPUT_STARTUP_GRACE", grace),
+			Window:              envDuration(prefix+"_LOW_THROUGHPUT_WINDOW", window),
+			Sustain:             envDuration(prefix+"_LOW_THROUGHPUT_SUSTAIN", sustain),
+			FloorBytesPerSecond: envInt64(prefix+"_LOW_THROUGHPUT_FLOOR_BPS", floor, 1, 1<<40),
+			BaselineFraction:    envFloat(prefix+"_LOW_THROUGHPUT_BASELINE_FRACTION", fraction, 0.01, 1),
 		},
 		AuthRef: authRef,
 	}

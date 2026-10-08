@@ -351,6 +351,7 @@ func (r *Runtime) transferLoop(ctx context.Context, provider config.Provider, wo
 			if errors.As(err, &lowThroughput) {
 				slog.Warn("recycle low-throughput transfer",
 					"provider", provider.SourceID,
+					"profile", provider.LowThroughput.Profile,
 					"task", task.ID,
 					"bytes_per_second", lowThroughput.BytesPerSecond,
 					"threshold_bytes_per_second", lowThroughput.Threshold,

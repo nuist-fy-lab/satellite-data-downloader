@@ -67,6 +67,37 @@ func TestInitialTransferConcurrencyNeverExceedsCeiling(t *testing.T) {
 	t.Fatal("GOES transfer worker missing")
 }
 
+func TestMODISAdaptiveFourToEightAndComparedRecyclingPolicies(t *testing.T) {
+	for _, tc := range []struct {
+		profile                string
+		grace, window, sustain time.Duration
+		floor                  int64
+		fraction               float64
+	}{
+		{"conservative", 90 * time.Second, 60 * time.Second, 120 * time.Second, 64 << 10, 0.12},
+		{"normal", 45 * time.Second, 30 * time.Second, 45 * time.Second, 128 << 10, 0.25},
+	} {
+		t.Run(tc.profile, func(t *testing.T) {
+			t.Setenv("SATDOWN_MODIS_LOW_THROUGHPUT_PROFILE", tc.profile)
+			t.Setenv("SATDOWN_MODIS_LOW_THROUGHPUT_ENABLED", "")
+			t.Setenv("SATDOWN_MODIS_TRANSFER_CONCURRENCY", "")
+			for _, p := range Load().Providers {
+				if p.SourceID != "modis" {
+					continue
+				}
+				if p.InitialTransferConcurrency != 4 || p.TransferConcurrency != 8 || !p.LowThroughput.Enabled ||
+					p.LowThroughput.Profile != tc.profile || p.LowThroughput.StartupGrace != tc.grace ||
+					p.LowThroughput.Window != tc.window || p.LowThroughput.Sustain != tc.sustain ||
+					p.LowThroughput.FloorBytesPerSecond != tc.floor || p.LowThroughput.BaselineFraction != tc.fraction {
+					t.Fatalf("wrong MODIS adaptive/profile config: %+v", p)
+				}
+				return
+			}
+			t.Fatal("MODIS missing")
+		})
+	}
+}
+
 func TestERA5WorkerUsesCentreIPC(t *testing.T) {
 	cfg := Load()
 	for _, p := range cfg.Providers {
