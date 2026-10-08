@@ -80,7 +80,11 @@ func runtimeRoot(home string) string {
 func provider(source string, enabled bool, initialTransfers, maxTransfers, verifiers int, timeout time.Duration, authRef string) Provider {
 	prefix := "SATDOWN_" + strings.ToUpper(strings.ReplaceAll(source, "-", "_"))
 	transferConcurrency := envInt(prefix+"_TRANSFER_CONCURRENCY", maxTransfers, 1, 32)
-	lowThroughputDefault := source == "goes" || source == "modis"
+	// Some LAADS connections remain slow but keep making useful progress.
+	// Recycling *every* MODIS connection every two minutes forces fresh TCP
+	// slow starts and prevents long granules from ever finishing. Prefer
+	// capped adaptive concurrency exploration and ordinary timeout handling.
+	lowThroughputDefault := source == "goes"
 	profile := "default"
 	grace, window, sustain := 30*time.Second, 30*time.Second, 45*time.Second
 	floor, fraction := int64(64<<10), 0.15

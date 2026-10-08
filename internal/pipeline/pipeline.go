@@ -43,7 +43,17 @@ type providerFlow struct {
 	nextStart                time.Time
 	errorRate                float64
 	normalTransferRates      []float64
+	probeAt                  time.Time
+	probeBytes               int64
+	probeBlockedUntil        time.Time
 }
+
+const (
+	// MODIS granules can take minutes under a slow upstream route. Scaling
+	// solely after eight *completed files* deadlocks concurrency at four.
+	progressProbeInterval = 45 * time.Second
+	progressProbeMinBytes = 512 << 10
+)
 
 func (f *providerFlow) start() bool {
 	f.Lock()
@@ -103,6 +113,10 @@ func (f *providerFlow) finish(success, congested bool, ceiling int) {
 			}
 		}
 		f.successes = 0
+		// True provider congestion (429/5xx or timeout), unlike a slow but
+		// progressing stream, prevents immediate upward exploration.
+		f.probeBlockedUntil = time.Now().Add(3 * progressProbeInterval)
+		f.probeAt, f.probeBytes = time.Now(), f.bytes
 	} else if success {
 		f.errorRate *= 0.8
 		f.successes++
@@ -118,6 +132,37 @@ func (f *providerFlow) addBytes(n int64) {
 	f.Lock()
 	f.bytes += n
 	f.Unlock()
+}
+
+// probeProgress performs additive concurrency exploration without waiting for
+// whole-file completion. It observes *aggregate useful bytes*, is capped by
+// configured concurrency and backs off after real upstream congestion.
+// No active transfer is ever cancelled to adjust the limit.
+func (f *providerFlow) probeProgress(now time.Time, ceiling int) (oldLimit, newLimit int, rate float64) {
+	f.Lock()
+	defer f.Unlock()
+	if f.probeAt.IsZero() {
+		f.probeAt, f.probeBytes = now, f.bytes
+		return f.limit, f.limit, 0
+	}
+	elapsed := now.Sub(f.probeAt)
+	if elapsed < progressProbeInterval {
+		return f.limit, f.limit, 0
+	}
+	progress := max(int64(0), f.bytes-f.probeBytes)
+	f.probeBytes, f.probeAt = f.bytes, now
+	oldLimit, newLimit = f.limit, f.limit
+	if elapsed > 0 {
+		rate = float64(progress) / elapsed.Seconds()
+	}
+	if now.Before(f.probeBlockedUntil) || f.errorRate >= 0.2 ||
+		f.limit >= ceiling || f.active < f.limit || progress < progressProbeMinBytes {
+		return oldLimit, newLimit, rate
+	}
+	f.limit++
+	f.gap = max(100*time.Millisecond, f.gap*4/5)
+	f.successes = 0
+	return oldLimit, f.limit, rate
 }
 
 func (f *providerFlow) observeTransferRate(bytes int64, elapsed time.Duration, floor int64) {
@@ -185,7 +230,7 @@ func New(cfg config.Config, state *store.Store, accessManager *access.Manager) (
 		}
 		providers[item.SourceID] = item
 		flows[item.SourceID] = &providerFlow{limit: max(1, min(item.InitialTransferConcurrency, item.TransferConcurrency)),
-			gap: 200 * time.Millisecond, lastSample: time.Now()}
+			gap: 200 * time.Millisecond, lastSample: time.Now(), probeAt: time.Now()}
 	}
 	return &Runtime{
 		cfg: cfg, store: state, access: accessManager, provider: providers, flows: flows,
@@ -201,6 +246,25 @@ func (r *Runtime) Run(ctx context.Context) {
 			continue
 		}
 		item := item
+		if item.SourceID == "modis" {
+			go func() {
+				ticker := time.NewTicker(5 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case now := <-ticker.C:
+						before, after, rate := r.flows[item.SourceID].probeProgress(now, item.TransferConcurrency)
+						if after > before {
+							slog.Info("adaptive MODIS concurrency grows on useful in-flight progress",
+								"from", before, "to", after, "ceiling", item.TransferConcurrency,
+								"aggregate_bytes_per_second", rate)
+						}
+					}
+				}
+			}()
+		}
 		for worker := 0; worker < item.TransferConcurrency; worker++ {
 			r.wg.Add(1)
 			go func(worker int) {

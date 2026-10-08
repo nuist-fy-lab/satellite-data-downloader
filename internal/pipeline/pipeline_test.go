@@ -99,6 +99,76 @@ func TestProviderFlowCanGrowAboveInitialLimit(t *testing.T) {
 	}
 }
 
+func TestMODISExploresDuringLongSlowTransfersWithoutCompletedFiles(t *testing.T) {
+	now := time.Now()
+	flow := &providerFlow{
+		limit: 4, active: 4, gap: 200 * time.Millisecond,
+		probeAt: now.Add(-progressProbeInterval - time.Second),
+		bytes:   2 << 20,
+	}
+	previous, next, rate := flow.probeProgress(now, 8)
+	if previous != 4 || next != 5 || rate <= 0 {
+		t.Fatalf("slow but progressing requests should grow 4->5 without a full-file completion: %d %d %.2f", previous, next, rate)
+	}
+	if _, next, _ := flow.probeProgress(now.Add(10*time.Second), 8); next != 5 {
+		t.Fatal("concurrency increased faster than the exploration interval")
+	}
+	for limit := 6; limit <= 8; limit++ {
+		flow.active = flow.limit
+		flow.addBytes(2 << 20)
+		_, next, _ = flow.probeProgress(now.Add(time.Duration(limit-4)*progressProbeInterval+10*time.Second), 8)
+		if next != limit {
+			t.Fatalf("progressive exploration stopped at %d, want %d", next, limit)
+		}
+	}
+	flow.active = 8
+	flow.addBytes(2 << 20)
+	if _, next, _ := flow.probeProgress(now.Add(8*progressProbeInterval), 8); next != 8 {
+		t.Fatal("concurrency exceeded configured ceiling")
+	}
+}
+
+func TestMODISProgressProbeNeedsTrafficAndFullSlots(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name   string
+		active int
+		delta  int64
+	}{
+		{"idle", 0, 2 << 20},
+		{"spare_slot", 3, 2 << 20},
+		{"no_progress", 4, 0},
+		{"insufficient_progress", 4, 200 << 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flow := &providerFlow{limit: 4, active: tc.active, probeAt: now.Add(-time.Minute), bytes: tc.delta}
+			_, next, _ := flow.probeProgress(now, 8)
+			if next != 4 {
+				t.Fatalf("%s grew to %d", tc.name, next)
+			}
+		})
+	}
+}
+
+func TestMODISCongestionSuppressesExplorationUntilCooldown(t *testing.T) {
+	now := time.Now()
+	flow := &providerFlow{limit: 4, active: 4, probeAt: now.Add(-time.Minute), bytes: 2 << 20, gap: 200 * time.Millisecond}
+	flow.finish(false, true, 8)
+	if flow.limit != 2 {
+		t.Fatalf("true upstream congestion must still reduce concurrency, got %d", flow.limit)
+	}
+	flow.active = flow.limit
+	flow.errorRate = 0
+	flow.addBytes(4 << 20)
+	if _, next, _ := flow.probeProgress(now.Add(time.Minute), 8); next != 2 {
+		t.Fatalf("probe ignored upstream congestion cooldown: %d", next)
+	}
+	flow.addBytes(4 << 20)
+	if _, next, _ := flow.probeProgress(now.Add(4*progressProbeInterval), 8); next != 3 {
+		t.Fatalf("probe never recovered after cooldown: %d", next)
+	}
+}
+
 func TestProviderLowThroughputThresholdUsesRecentMedian(t *testing.T) {
 	flow := &providerFlow{}
 	policy := config.LowThroughputPolicy{
