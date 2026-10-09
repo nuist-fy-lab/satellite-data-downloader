@@ -33,6 +33,17 @@ type Runtime struct {
 	wg       sync.WaitGroup
 }
 
+func (r *Runtime) ArchiveRootFor(source string) (string, error) {
+	p, ok := r.provider[source]
+	if !ok || !p.Enabled {
+		return "", fmt.Errorf("archive provider %s unavailable", source)
+	}
+	if p.ArchiveRoot != "" {
+		return p.ArchiveRoot, nil
+	}
+	return r.cfg.ArchiveRoot, nil
+}
+
 type providerFlow struct {
 	sync.Mutex
 	limit, active, successes int

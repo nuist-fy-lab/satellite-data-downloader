@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"github.com/nuist-fy-lab/satellite-data-downloader/internal/model"
 	"github.com/nuist-fy-lab/satellite-data-downloader/internal/pipeline"
 	"github.com/nuist-fy-lab/satellite-data-downloader/internal/store"
+	"github.com/nuist-fy-lab/satellite-data-downloader/internal/transfer"
 )
 
 type Server struct {
@@ -25,6 +27,7 @@ func New(state *store.Store, runtime *pipeline.Runtime) http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /v1/providers", s.providers)
 	mux.HandleFunc("POST /v1/tasks", s.enqueue)
+	mux.HandleFunc("POST /v1/tasks/adopt-verified", s.adoptVerified)
 	mux.HandleFunc("GET /v1/tasks", s.tasks)
 	mux.HandleFunc("POST /v1/tasks/status", s.taskStatuses)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.task)
@@ -36,6 +39,53 @@ func New(state *store.Store, runtime *pipeline.Runtime) http.Handler {
 		})
 	}
 	return withHeaders(mux)
+}
+
+// Only the centre's local Unix socket can request this operation. SHA-256
+// is independently recomputed from disk before any download task is marked
+// complete. A conflicting in-flight task is never cancelled or overwritten.
+func (s *Server) adoptVerified(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Task        model.TaskSpec `json:"task"`
+		ArchivePath string         `json:"archive_path"`
+		SHA256      string         `json:"sha256"`
+	}
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(input.Task.Key) == "" {
+		input.Task.Key = taskKey(input.Task)
+	}
+	if err := s.pipeline.ValidateTask(input.Task); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if existing, err := s.store.TaskByKey(r.Context(), input.Task.Key); err == nil {
+		// Overlapping orders do not repeatedly hash an already registered
+		// file or replace a currently downloading shared task.
+		writeJSON(w, http.StatusOK, map[string]any{"task": existing, "created": false, "reused_local": false})
+		return
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	root, err := s.pipeline.ArchiveRootFor(input.Task.SourceID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	path, size, err := transfer.VerifiedArchiveReuse(input.Task, root, input.ArchivePath, input.SHA256)
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	task, created, err := s.store.AdoptVerified(r.Context(), input.Task, path, input.SHA256, size)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"task": task, "created": created, "reused_local": created})
 }
 
 // archiveAudit is available only via the downloader's protected local Unix

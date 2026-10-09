@@ -5,11 +5,49 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nuist-fy-lab/satellite-data-downloader/internal/model"
 )
+
+func TestAdoptVerifiedSharesExistingAcrossOrders(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	spec := model.TaskSpec{
+		Key: "global-unique-satellite-asset", SourceID: "modis",
+		CollectionID: "modis:MYD06", GranuleID: "modis:granule-1", AssetID: "asset",
+		Name: "cloud.hdf", URL: "https://example.invalid/archive/cloud.hdf",
+		RelativeDir: "modis/2026"}
+	digest := strings.Repeat("a", 64)
+	first, created, err := s.AdoptVerified(ctx, spec, "/archive/cloud.hdf", digest, 1024)
+	if err != nil || !created || first.State != "done" || first.SHA256 != digest {
+		t.Fatalf("adopt=%+v created=%v err=%v", first, created, err)
+	}
+	second, created, err := s.AdoptVerified(ctx, spec, "/other/cloud.hdf", strings.Repeat("b", 64), 1024)
+	if err != nil || created || second.ID != first.ID || second.ArchivePath != first.ArchivePath {
+		t.Fatalf("cross-order archive silently replaced: %+v created=%v err=%v", second, created, err)
+	}
+	shared, created, err := s.Enqueue(ctx, spec)
+	if err != nil || created || shared.ID != first.ID {
+		t.Fatalf("second order did not reuse completed download: %+v %v %v", shared, created, err)
+	}
+	newTask := spec
+	newTask.Key = "already-downloading"
+	queued, created, err := s.Enqueue(ctx, newTask)
+	if err != nil || !created {
+		t.Fatal(err)
+	}
+	nowAdopted, created, err := s.AdoptVerified(ctx, newTask, "/archive/cloud.hdf", digest, 1024)
+	if err != nil || created || nowAdopted.ID != queued.ID || nowAdopted.State != "queued" {
+		t.Fatalf("active queue replaced with adopted archive: %+v created=%v err=%v", nowAdopted, created, err)
+	}
+}
 
 func TestOfficialChecksumMigrationPreservesOldQueueAndVerificationStatus(t *testing.T) {
 	name := filepath.Join(t.TempDir(), "existing.sqlite3")

@@ -191,6 +191,33 @@ func (s *Store) Enqueue(ctx context.Context, spec model.TaskSpec) (model.Task, b
 	return task, false, err
 }
 
+// AdoptVerified creates a DONE task only for a *new* task key. When an order
+// already owns the key (including active transfers), the existing work is
+// shared and cannot be silently replaced by a separate local archive.
+// The caller must hash-verify the indexed local file before invoking this.
+func (s *Store) AdoptVerified(ctx context.Context, spec model.TaskSpec, path, digest string, size int64) (model.Task, bool, error) {
+	now := stamp(time.Now())
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO tasks(
+		 task_key,source_id,collection_id,granule_id,asset_id,filename,url,auth_ref,relative_dir,
+		 expected_size,etag,media_type,state,attempts,observed_size,sha256,archive_path,
+		 official_checksum_status,requested_at,completed_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'done',0,?,?,?,'local_only',?,?,?)
+		ON CONFLICT(task_key) DO NOTHING`,
+		spec.Key, spec.SourceID, spec.CollectionID, spec.GranuleID, spec.AssetID, spec.Name, spec.URL,
+		spec.AuthRef, spec.RelativeDir, spec.Size, spec.ETag, spec.MediaType,
+		size, digest, path, now, now, now)
+	if err != nil {
+		return model.Task{}, false, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return model.Task{}, false, err
+	}
+	item, err := s.TaskByKey(ctx, spec.Key)
+	return item, changed == 1, err
+}
+
 func (s *Store) ClaimTransfer(ctx context.Context, sourceID string) (model.Task, bool, error) {
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
